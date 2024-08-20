@@ -89,6 +89,7 @@ use {
         time::{Duration, Instant},
     },
 };
+use crate::bank_manager::BankForkClient;
 
 pub const MAX_ENTRY_RECV_PER_ITER: usize = 512;
 pub const SUPERMINORITY_THRESHOLD: f64 = 1f64 / 3f64;
@@ -3971,6 +3972,14 @@ impl ReplayStage {
         }
     }
 
+    fn update_fork_propagated_threshold_from_votes_with_channels(
+        progress: &mut ProgressMap,
+        mut newly_voted_pubkeys: Vec<Pubkey>,
+        mut cluster_slot_pubkeys: Vec<Pubkey>,
+        fork_tip: Slot,
+        bank_forks: &BankForkClient,
+    ) {}
+
     fn update_fork_propagated_threshold_from_votes(
         progress: &mut ProgressMap,
         mut newly_voted_pubkeys: Vec<Pubkey>,
@@ -4329,6 +4338,106 @@ impl ReplayStage {
         let mut forks = bank_forks.write().unwrap();
         for (_, bank) in new_banks {
             forks.insert(bank);
+        }
+        generate_new_bank_forks_write_lock.stop();
+        saturating_add_assign!(
+            replay_timing.generate_new_bank_forks_read_lock_us,
+            generate_new_bank_forks_read_lock.as_us()
+        );
+        saturating_add_assign!(
+            replay_timing.generate_new_bank_forks_get_slots_since_us,
+            generate_new_bank_forks_get_slots_since.as_us()
+        );
+        saturating_add_assign!(
+            replay_timing.generate_new_bank_forks_loop_us,
+            generate_new_bank_forks_loop.as_us()
+        );
+        saturating_add_assign!(
+            replay_timing.generate_new_bank_forks_write_lock_us,
+            generate_new_bank_forks_write_lock.as_us()
+        );
+    }
+
+    //This is just an example of what functions might look like using the BankForkClient instead of RwLock
+    fn generate_new_bank_forks_with_channels(
+        blockstore: &Blockstore,
+        bank_client: BankForkClient,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
+        rpc_subscriptions: &Arc<RpcSubscriptions>,
+        progress: &mut ProgressMap,
+        replay_timing: &mut ReplayLoopTiming,
+    ) {
+        // Find the next slot that chains to the old slot
+        let mut generate_new_bank_forks_read_lock =
+            Measure::start("generate_new_bank_forks_read_lock");
+        // let forks = bank_forks.read().unwrap();
+        generate_new_bank_forks_read_lock.stop();
+
+        let frozen_banks = bank_client.frozen_banks();
+        let frozen_bank_slots: Vec<u64> = frozen_banks
+            .keys()
+            .cloned()
+            .filter(|s| *s >= bank_client.root())
+            .collect();
+        let mut generate_new_bank_forks_get_slots_since =
+            Measure::start("generate_new_bank_forks_get_slots_since");
+        let next_slots = blockstore
+            .get_slots_since(&frozen_bank_slots)
+            .expect("Db error");
+        generate_new_bank_forks_get_slots_since.stop();
+
+        // Filter out what we've already seen
+        trace!("generate new forks {:?}", {
+            let mut next_slots = next_slots.iter().collect::<Vec<_>>();
+            next_slots.sort();
+            next_slots
+        });
+        let mut generate_new_bank_forks_loop = Measure::start("generate_new_bank_forks_loop");
+        let mut new_banks = HashMap::new();
+        for (parent_slot, children) in next_slots {
+            let parent_bank = frozen_banks
+                .get(&parent_slot)
+                .expect("missing parent in bank forks");
+            for child_slot in children {
+                if bank_client.get(child_slot).is_some() || new_banks.contains_key(&child_slot) {
+                    trace!("child already active or frozen {}", child_slot);
+                    continue;
+                }
+                let leader = leader_schedule_cache
+                    .slot_leader_at(child_slot, Some(parent_bank))
+                    .unwrap();
+                info!(
+                    "new fork:{} parent:{} root:{}",
+                    child_slot,
+                    parent_slot,
+                    bank_client.root()
+                );
+                let child_bank = Self::new_bank_from_parent_with_notify(
+                    parent_bank.clone(),
+                    child_slot,
+                    bank_client.root(),
+                    &leader,
+                    rpc_subscriptions,
+                    NewBankOptions::default(),
+                );
+                let empty: Vec<Pubkey> = vec![];
+                Self::update_fork_propagated_threshold_from_votes_with_channels(
+                    progress,
+                    empty,
+                    vec![leader],
+                    parent_bank.slot(),
+                    &bank_client,
+                );
+                new_banks.insert(child_slot, child_bank);
+            }
+        }
+        generate_new_bank_forks_loop.stop();
+
+        let mut generate_new_bank_forks_write_lock =
+            Measure::start("generate_new_bank_forks_write_lock");
+
+        for (_, bank) in new_banks {
+            bank_client.insert(bank);
         }
         generate_new_bank_forks_write_lock.stop();
         saturating_add_assign!(

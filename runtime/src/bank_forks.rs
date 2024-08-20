@@ -138,6 +138,53 @@ impl BankForks {
         bank_forks
     }
 
+    pub fn new(root_bank: Bank) -> Self {
+        let root_bank = Arc::new(root_bank);
+        let root_slot = root_bank.slot();
+
+        let mut banks = HashMap::new();
+        banks.insert(
+            root_slot,
+            BankWithScheduler::new_without_scheduler(root_bank.clone()),
+        );
+
+        let parents = root_bank.parents();
+        for parent in parents {
+            if banks
+                .insert(
+                    parent.slot(),
+                    BankWithScheduler::new_without_scheduler(parent.clone()),
+                )
+                .is_some()
+            {
+                // All ancestors have already been inserted by another fork
+                break;
+            }
+        }
+
+        let mut descendants = HashMap::<_, HashSet<_>>::new();
+        descendants.entry(root_slot).or_default();
+        for parent in root_bank.proper_ancestors() {
+            descendants.entry(parent).or_default().insert(root_slot);
+        }
+
+        let bank_forks = Self {
+            root: Arc::new(AtomicSlot::new(root_slot)),
+            banks,
+            descendants,
+            snapshot_config: None,
+            accounts_hash_interval_slots: u64::MAX,
+            last_accounts_hash_slot: root_slot,
+            in_vote_only_mode: Arc::new(AtomicBool::new(false)),
+            highest_slot_at_startup: 0,
+            scheduler_pool: None,
+        };
+
+        // TODO this is just for demo purposes
+        // root_bank.set_fork_graph_in_program_cache(bank_forks);
+        bank_forks
+    }
+
     pub fn banks(&self) -> &HashMap<Slot, BankWithScheduler> {
         &self.banks
     }

@@ -1,58 +1,41 @@
-use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use crossbeam_channel::unbounded;
-use futures::stream::iter;
 use log::info;
 use rand::Rng;
 use rayon::prelude::*;
 use solana_core::banking_trace::BankingTracer;
 use solana_core::cluster_info_vote_listener::VoteTracker;
 use solana_core::cluster_slots_service::cluster_slots::ClusterSlots;
-use solana_core::consensus::heaviest_subtree_fork_choice::HeaviestSubtreeForkChoice;
-use solana_core::consensus::progress_map::{ForkProgress, ProgressMap};
 use solana_core::consensus::tower_storage::FileTowerStorage;
-use solana_core::consensus::{Tower, VOTE_THRESHOLD_DEPTH};
-use solana_core::repair::ancestor_hashes_service::{AncestorHashesReplayUpdate, AncestorHashesReplayUpdateSender};
-use solana_core::repair::cluster_slot_state_verifier::{DuplicateConfirmedSlots, DuplicateSlotsTracker, EpochSlotsFrozenSlots};
-use solana_core::repair::repair_service::OutstandingShredRepairs;
+use solana_core::consensus::{Tower};
+use solana_core::repair::ancestor_hashes_service::{AncestorHashesReplayUpdateSender};
 use solana_core::replay_stage::{ReplayStage, ReplayStageConfig};
-use solana_core::unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes;
 use solana_entry::entry::{create_ticks, Entry};
 use solana_gossip::cluster_info::{ClusterInfo, Node};
 use solana_ledger::blockstore::{Blockstore, BlockstoreError, BlockstoreSignals};
 use solana_ledger::blockstore_options::BlockstoreOptions;
-use solana_ledger::genesis_utils::create_genesis_config;
 use solana_ledger::leader_schedule_cache::LeaderScheduleCache;
 use solana_ledger::shred::{ProcessShredsStats, ReedSolomonCache, Shredder};
-use solana_ledger::{create_new_tmp_ledger, create_new_tmp_ledger_auto_delete};
+use solana_ledger::{create_new_tmp_ledger_auto_delete};
 use solana_poh::poh_recorder::create_test_recorder;
 use solana_rpc::optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank;
-use solana_rpc::rpc::{create_test_transaction_entries, populate_blockstore_for_tests};
+use solana_rpc::rpc::{populate_blockstore_for_tests};
 use solana_rpc::rpc_subscriptions::RpcSubscriptions;
 use solana_runtime::accounts_background_service::AbsRequestSender;
 use solana_runtime::bank::Bank;
-use solana_runtime::bank_client::BankClient;
 use solana_runtime::bank_forks::BankForks;
-use solana_runtime::commitment::{BlockCommitmentCache, VOTE_THRESHOLD_SIZE};
+use solana_runtime::commitment::{BlockCommitmentCache};
 use solana_runtime::genesis_utils::{create_genesis_config_with_leader, GenesisConfigInfo};
-use solana_runtime::installed_scheduler_pool::BankWithScheduler;
-use solana_runtime::loader_utils::create_invoke_instruction;
 use solana_runtime::prioritization_fee_cache::PrioritizationFeeCache;
 use solana_sdk::account::{Account, ReadableAccount};
 use solana_sdk::clock::{Epoch, Slot};
 use solana_sdk::hash::Hash;
-use solana_sdk::message::Message;
-use solana_sdk::poh_config::PohConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature, Signer};
-use solana_sdk::transaction::{SanitizedTransaction, Transaction};
+use solana_sdk::transaction::{Transaction};
 use solana_sdk::{system_program, system_transaction};
 use solana_streamer::socket::SocketAddrSpace;
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -102,7 +85,16 @@ fn create_replay_stage_config(
 }
 
 #[test]
-fn run_replay_stage() -> () {
+fn run_replay_stage_in_serial() {
+    run_replay_stage(1, 1);
+}
+
+#[test]
+fn run_replay_stage_in_parallel() {
+    run_replay_stage(4, 4);
+}
+
+fn run_replay_stage(replay_forks_threads_amount: usize, replay_transactions_threads_amount: usize) -> () {
     solana_logger::setup();
 
     //Setup nodes and cluster
@@ -185,8 +177,9 @@ fn run_replay_stage() -> () {
     let cluster_slots = Arc::new(ClusterSlots::default());
 
     //Setup threads
-    let replay_forks_threads = NonZeroUsize::new(2).unwrap(); //tvu_config default - 1 serial mode, > 1 parallel
-    let replay_transactions_threads = NonZeroUsize::new(2).unwrap(); //tvu_config default - 1 serial mode, > 1 parallel
+    //Setting to 1 thread will run in serial mode. Greater than 1 will run in parallel mode
+    let replay_forks_threads = NonZeroUsize::new(replay_forks_threads_amount).unwrap();
+    let replay_transactions_threads = NonZeroUsize::new(replay_transactions_threads_amount).unwrap();
 
     //Setup channels
     let (retransmit_slots_sender, _retransmit_slots_receiver) = unbounded();
@@ -235,6 +228,7 @@ fn run_replay_stage() -> () {
         popular_pruned_forks_receiver,
     ).expect("Panic in ReplayStage::new");
 
+    //TODO properly handle shutting down
     thread::sleep(Duration::from_millis(500));
     exit.store(true, Ordering::Relaxed);
     stage.join().unwrap();
@@ -404,10 +398,8 @@ pub fn create_transaction_entries(
     let transactions = create_transactions(bank, num);
 
     let mut blockhash = bank.confirmed_last_blockhash(); //confirmed_last_blockhash
-    let rent_exempt_amount = bank.get_minimum_balance_for_rent_exemption(0);
     let mut entries = Vec::new();
     let mut signatures = Vec::new();
-
 
     for transaction in transactions {
         signatures.push(transaction.signatures[0]);
@@ -459,5 +451,3 @@ fn create_funded_accounts(bank: &Bank, num: usize) -> Vec<Keypair> {
 
     accounts
 }
-//(run `cargo fix --test "replay_stage_test"`
-
