@@ -91,6 +91,8 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 trees = { workspace = true }
+criterion = { workspace = true }
+criterion-stats = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
@@ -149,6 +151,14 @@ name = "gen_keys"
 
 [[bench]]
 name = "sigverify_stage"
+
+[[bench]]
+name = "replay_stage_bench"
+harness = false
+
+[[bench]]
+name = "tvu_bench"
+harness = false
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
